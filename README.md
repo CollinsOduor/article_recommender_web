@@ -1,8 +1,9 @@
 # Next Article frontend
 
 Next.js app for the FastAPI article recommender in `../article_recommender_api`.
-It collects five recent article IDs, optional sections and profile details, and
-displays the ranked recommendations returned by the model.
+It searches the model's article catalog by title, uses the selected match's
+article ID for the five recent reads, collects optional sections and profile
+details, and displays the ranked recommendations returned by the model.
 
 ## Run locally
 

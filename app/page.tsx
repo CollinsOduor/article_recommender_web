@@ -1,10 +1,23 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 type HistoryEvent = {
+  title: string;
   article_id: string;
   page_section: string;
+};
+
+type ArticleMatch = {
+  article_id: string;
+  title: string;
+};
+
+type TitleLookup = {
+  query: string;
+  results: ArticleMatch[];
+  loading: boolean;
+  error?: string;
 };
 
 type Recommendation = {
@@ -26,7 +39,11 @@ type HealthResponse = {
 };
 
 const emptyHistory = (): HistoryEvent[] =>
-  Array.from({ length: 5 }, () => ({ article_id: "", page_section: "" }));
+  Array.from({ length: 5 }, () => ({
+    title: "",
+    article_id: "",
+    page_section: "",
+  }));
 
 function localDateTimeValue(date: Date): string {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
@@ -67,6 +84,8 @@ async function responseMessage(response: Response): Promise<string> {
 
 export default function Home() {
   const [history, setHistory] = useState<HistoryEvent[]>(emptyHistory);
+  const [titleLookups, setTitleLookups] = useState<Record<number, TitleLookup>>({});
+  const [activeTitleIndex, setActiveTitleIndex] = useState<number | null>(null);
   const [age, setAge] = useState("");
   const [gender, setGender] = useState("");
   const [jobtitle, setJobtitle] = useState("");
@@ -80,6 +99,7 @@ export default function Home() {
   const [result, setResult] = useState<RecommendationResponse | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthMessage, setHealthMessage] = useState("Checking recommender…");
+  const titleSearchTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
 
   const checkHealth = useCallback(async () => {
     try {
@@ -109,6 +129,13 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [checkHealth]);
 
+  useEffect(
+    () => () => {
+      Object.values(titleSearchTimers.current).forEach(clearTimeout);
+    },
+    [],
+  );
+
   function updateHistory(
     index: number,
     key: keyof HistoryEvent,
@@ -121,13 +148,93 @@ export default function Home() {
     );
   }
 
+  function searchTitle(index: number, title: string) {
+    const previousTimer = titleSearchTimers.current[index];
+    if (previousTimer) clearTimeout(previousTimer);
+
+    setHistory((current) =>
+      current.map((event, eventIndex) =>
+        eventIndex === index
+          ? { ...event, title, article_id: "" }
+          : event,
+      ),
+    );
+
+    const query = title.trim();
+    if (query.length < 2) {
+      setTitleLookups((current) => ({
+        ...current,
+        [index]: { query, results: [], loading: false },
+      }));
+      delete titleSearchTimers.current[index];
+      return;
+    }
+
+    setTitleLookups((current) => ({
+      ...current,
+      [index]: { query, results: [], loading: true },
+    }));
+    titleSearchTimers.current[index] = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ q: query, limit: "8" });
+        const response = await fetch(`/recommender/articles/search?${params}`);
+        if (!response.ok) {
+          const error =
+            response.status >= 500 && response.status !== 503
+              ? "Cannot reach the recommender API."
+              : await responseMessage(response);
+          setTitleLookups((current) => ({
+            ...current,
+            [index]: {
+              query,
+              results: [],
+              loading: false,
+              error,
+            },
+          }));
+          return;
+        }
+        const results = (await response.json()) as ArticleMatch[];
+        setTitleLookups((current) => ({
+          ...current,
+          [index]: { query, results, loading: false },
+        }));
+      } catch {
+        setTitleLookups((current) => ({
+          ...current,
+          [index]: {
+            query,
+            results: [],
+            loading: false,
+            error: "Could not reach the article title catalog.",
+          },
+        }));
+      }
+    }, 250);
+  }
+
+  function selectArticle(index: number, article: ArticleMatch) {
+    setHistory((current) =>
+      current.map((event, eventIndex) =>
+        eventIndex === index
+          ? {
+              ...event,
+              title: article.title,
+              article_id: article.article_id,
+            }
+          : event,
+      ),
+    );
+    setActiveTitleIndex(null);
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
     setResult(null);
 
     if (history.some((item) => !item.article_id.trim())) {
-      setError("Enter an article ID for each of the five recent reads.");
+      setError("Choose an article from the title matches for each recent read.");
       return;
     }
     if (!recommendationTime || Number.isNaN(new Date(recommendationTime).getTime())) {
@@ -239,8 +346,8 @@ export default function Home() {
             <span className="required-pill">5 reads</span>
           </div>
           <p className="section-intro">
-            Add your five most recent article IDs, from oldest to newest.
-            Sections are optional.
+            Search for your five most recent article titles, from oldest to
+            newest. We’ll match each title to its article ID. Sections are optional.
           </p>
 
           <form onSubmit={submit}>
@@ -248,18 +355,64 @@ export default function Home() {
               {history.map((item, index) => (
                 <div className="history-row" key={index}>
                   <span className="history-index">{String(index + 1).padStart(2, "0")}</span>
-                  <label className="field article-field">
-                    <span className="sr-only">Article ID for read {index + 1}</span>
-                    <input
-                      value={item.article_id}
-                      onChange={(event) =>
-                        updateHistory(index, "article_id", event.target.value)
-                      }
-                      placeholder="Article ID"
-                      maxLength={256}
-                      required
-                    />
-                  </label>
+                  <div className="field title-field">
+                    <label className="sr-only" htmlFor={`article-title-${index}`}>
+                      Article title for read {index + 1}
+                    </label>
+                    <div className="title-search-wrap">
+                      <input
+                        id={`article-title-${index}`}
+                        value={item.title}
+                        onChange={(event) => searchTitle(index, event.target.value)}
+                        onFocus={() => setActiveTitleIndex(index)}
+                        onBlur={() =>
+                          window.setTimeout(() => setActiveTitleIndex(null), 120)
+                        }
+                        placeholder="Search article title"
+                        maxLength={200}
+                        autoComplete="off"
+                        required
+                      />
+                      {activeTitleIndex === index &&
+                        item.title.trim().length >= 2 &&
+                        !item.article_id &&
+                        titleLookups[index]?.query === item.title.trim() && (
+                          <div className="title-results" role="listbox">
+                            {titleLookups[index].loading ? (
+                              <div className="title-result-message">Searching titles…</div>
+                            ) : titleLookups[index].error ? (
+                              <div className="title-result-message title-result-error">
+                                {titleLookups[index].error}
+                              </div>
+                            ) : titleLookups[index].results.length ? (
+                              titleLookups[index].results.map((article) => (
+                                <button
+                                  className="title-result"
+                                  key={article.article_id}
+                                  type="button"
+                                  role="option"
+                                  aria-selected={false}
+                                  onMouseDown={(event) => event.preventDefault()}
+                                  onClick={() => selectArticle(index, article)}
+                                >
+                                  <span>{article.title}</span>
+                                  <small>ID {article.article_id}</small>
+                                </button>
+                              ))
+                            ) : (
+                              <div className="title-result-message">
+                                No matching article titles.
+                              </div>
+                            )}
+                          </div>
+                        )}
+                    </div>
+                    {item.article_id && (
+                      <span className="selected-article-id">
+                        Matched ID: {item.article_id}
+                      </span>
+                    )}
+                  </div>
                   <label className="field section-field">
                     <span className="sr-only">Section for read {index + 1}</span>
                     <input
@@ -275,8 +428,8 @@ export default function Home() {
               ))}
             </div>
             <p className="helper-text">
-              Article IDs should come from the model’s training catalog. Unknown
-              IDs can be entered, but may be less informative.
+              Select a matching title from the model’s catalog. The matched
+              article ID is shown under each selection.
             </p>
 
             <div className="form-divider" />
